@@ -1,6 +1,6 @@
 import time
 import ssl
-from ldap3 import Server, ALL, Connection, NTLM, SUBTREE, Tls, MODIFY_ADD, MODIFY_REPLACE
+from ldap3 import Server, ALL, Connection, NTLM, SUBTREE, Tls, MODIFY_ADD, MODIFY_REPLACE, SASL, KERBEROS
 from rich import print # for colors
 import readline
 import rlcompleter
@@ -496,7 +496,7 @@ def list_users(conn, base_dn):
             outfile.write(user + "\n")
     print(f"[+] {len(conn.entries)} usernames saved to usernames.txt")
 def list_computers(conn, base_dn):
-    conn.search(base_dn, "(objectClass=computer)", attributes=["sAMAccountName", "dNSHostname", "operatingSystem"]) # we can add more tho
+    conn.search(base_dn, "(objectClass=computer)", attributes=["sAMAccountName", "dNSHostname", "operatingSystem", "memberOf", "distinguishedName"]) # we can add more tho
 
     print("\n[bold cyan]Computers[/bold cyan]")
 
@@ -505,7 +505,12 @@ def list_computers(conn, base_dn):
         comp = str(entry.sAMAccountName)
         dnshostname = str(entry.dNSHostname)
         operatingsystem = str(entry.operatingSystem)
-        print(f"[bold red]{comp} - {dnshostname} - {operatingsystem}[/bold red]")
+        membersof = str(entry.memberOf)
+        distinguishedNamee = str(entry.distinguishedName)
+        print(f"[bold yellow]{comp} - {dnshostname} - {operatingsystem} - {distinguishedNamee}[/bold yellow]")
+        if "Pre-Windows 2000" in membersof:
+            if not "Domain Controllers" in distinguishedNamee:
+                print(f"[bold red]{comp} has weakkness try pre2k for this computer[/bold red]")
 
 def add_member(conn, base_dn, group_name, user_name):
     # get user DN
@@ -654,6 +659,36 @@ def connect(connection):
                 save_password(password)
             except Exception as e:
                 print(f"[-] Connection Failed: {e}")
+        elif command[0] == "connectk":
+            if len(command) < 5:
+                print("connectk <username> <password> <domain> <dc_ip>")
+                continue
+            username = command[1]
+            password = command[2]
+            domain = command[3]
+            dc_ip = command[4]
+
+            netbios = infer_netbios(domain)
+            base_dn = domain_to_dn(domain)
+
+            try:
+                print(f"[*] Attempting to fetch Kerberos ticket for {username}@{domain}...")
+                os.system(f"echo '{password}' | kinit {username}@{domain}")
+                server = Server(dc_ip, get_info=ALL)
+                conn = Connection(server, user=f"{netbios}\\{username}", password=password, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
+                profile = {"ip": dc_ip, "username": username, "password": password, "conn":conn, "base_dn":base_dn, "connected_at": time.time(), "domain": domain, "ldaps":False}
+                if sessions.size() >= MAX_SESSIONS:
+                    removed = sessions.items.pop(0)
+                    print(f"[bold red][!] Session limit reached. Removing oldest session ({removed['username']}@{removed['ip']})[/bold red]")
+                    if current_session == removed:
+                        current_session = None
+                sessions.push(profile)
+                if not current_session:
+                    current_session = profile
+                print(f"[bold green][!] Connected to {domain}. Session ID: {sessions.size()-1}[/bold green]")
+                save_password(password)
+            except Exception as e:
+                print(f"[-] Connection Failed: {e}")
         elif command[0] == "connect_hash":
             if len(command) < 5:
                 print("connect_hash <username> <nthash> <domain> <dc_ip>")
@@ -739,7 +774,7 @@ def connect(connection):
             try:
                 conn = current_session["conn"]
                 base_dn = current_session["base_dn"]
-                conn.search(base_dn, f"(sAMAccountName={username})", attributes=["cn", "memberOf"])
+                conn.search(base_dn, f"(sAMAccountName={username})", attributes=["cn", "memberOf", "userAccountControl", "userPrincipalName", "objectSid"])
                 if conn.entries:
                     print(conn.entries[0])
                     history.push(username)
@@ -1020,7 +1055,17 @@ def connect(connection):
                 get_sid(current_session["conn"], current_session["base_dn"], command[1])
             except Exception as e:
                 print(f"[-] Error getting SID: {e}")
-
+        elif command[0] == "addmember":
+            if not current_session:
+                print("No active session! Please 'use' a session or 'connect' first.")
+                continue
+            if len(command) < 3:
+                print("addmember <group_name> <username>")
+                continue
+            try:
+                add_member(current_session["conn"], current_session["base_dn"], command[1], command[2])
+            except Exception as e:
+                print(f"[-] Error while add users: {e}")
         elif command[0] == "exit":
             break
         else:
