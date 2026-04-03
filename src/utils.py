@@ -100,6 +100,30 @@ def check_connection(tree, connected):
     else:
         print(f" -> [bold red]No[/bold red]: {tree.left.question}")
 
+WELL_KNOWN_SIDS = {
+    "S-1-0-0": "Nobody",
+    "S-1-1-0": "Everyone",
+    "S-1-2-0": "Local",
+    "S-1-3-0": "Creator Owner",
+    "S-1-3-1": "Creator Group",
+    "S-1-5-1": "Dialup",
+    "S-1-5-2": "Network",
+    "S-1-5-3": "Batch",
+    "S-1-5-4": "Interactive",
+    "S-1-5-6": "Service",
+    "S-1-5-7": "Anonymous Logon",
+    "S-1-5-9": "Enterprise Domain Controllers",
+    "S-1-5-10": "Self",
+    "S-1-5-11": "Authenticated Users",
+    "S-1-5-12": "Restricted Code",
+    "S-1-5-13": "Terminal Server Users",
+    "S-1-5-14": "Remote Interactive Logon",
+    "S-1-5-17": "IIS APPPOOL",
+    "S-1-5-18": "Local System",
+    "S-1-5-19": "NT Authority\\Local Service",
+    "S-1-5-20": "NT Authority\\Network Service",
+}
+
 def resolve_sid(conn, base_dn, sid):
     """Resolve a SID string to its friendly name."""
     if sid in WELL_KNOWN_SIDS:
