@@ -9,7 +9,6 @@ import os
 import atexit
 import heapq
 import shlex
-
 histfile = os.path.expanduser(".ldap_shell_history")
 
 if os.path.exists(histfile):
@@ -22,7 +21,7 @@ from src.queries import batch_lookup, build_category_tree, print_categories, lis
 from src.add import add_member, add_computer, modify_uac, set_password
 from src.acls import cmd_setowner, cmd_genericall
 from src.auth import samr_set_password
-
+from src.discover import get_domain_info
 sessions = Session()
 current_session = None
 history = Session()
@@ -599,6 +598,13 @@ def connect(connection):
                 add_computer(current_session["conn"], current_session["base_dn"], comp_name, comp_pass, current_session["domain"], current_session)
             except Exception as e:
                 print(f"[-] Error adding computer: {e}")
+        elif command[0] == "ldap":
+            if len(command) < 2:
+                print("ldap <ip>")
+                continue
+            target_ip = command[1]
+
+            get_domain_info(target_ip)
         elif command[0] == "exit":
             break
         else:
